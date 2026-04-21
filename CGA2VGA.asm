@@ -37,6 +37,8 @@
 ; Usage:    CGA2VGA.COM           (install)
 ;           CGA2VGA.COM /U        (uninstall)
 ;           CTRL+ALT+1..4 during game (switch palettes)
+;           CTRL+ALT+V  toggle VSync wait
+;           CTRL+ALT+E  force-enable for games that bypass INT 10h
 ;
 ; Author: Retro Erik, 2026 using VS Code with GitHub Copilot
 ;
@@ -590,6 +592,173 @@ clear_vga_vram:
     ret
 
 ; ============================================================================
+; FORCE ENABLE — Manually activate emulation via hotkey (CTRL+ALT+E)
+; ============================================================================
+; For games that bypass INT 10h and set CGA mode via direct port I/O
+; (e.g. Ms. Pac-Man, California Games, Boulder Dash). The user starts
+; the game normally, sees 4-color CGA graphics, then presses CTRL+ALT+E
+; to tell the TSR to take over.
+;
+; Assumes mode 4/5 (most bypass games use 320x200x4). User can switch
+; palette with CTRL+ALT+1..4 afterwards if needed.
+;
+; Called from INT 09h context — interrupts are off. We do the full
+; Mode 13h setup: BIOS mode set, GC6 128K window, save CRTC, patch BDA,
+; load palette, build LUT, and start converting.
+
+force_enable:
+    pushad
+    push es
+
+    ; Disable emulation during setup
+    mov byte [cs:is_emulating], 0
+
+    ; Default to mode 4 with curated palette
+    mov byte [cs:current_mode], CGA_MODE_4
+    mov byte [cs:current_page], 0
+    mov word [cs:page_base], 0
+    mov al, [cs:mode4_palette_idx]
+    mov [cs:current_palette], al
+
+    ; Step 1: Set CGA mode first (prime B800h memory handler)
+    cli
+    mov ax, 0x0004                  ; AH=00h, AL=04h (CGA mode 4)
+    pushf
+    call far [cs:orig_int10_ofs]
+
+    ; Step 2: Set Mode 13h for VGA display
+    mov ax, VGA_MODE_13H            ; AH=00h, AL=13h
+    pushf
+    call far [cs:orig_int10_ofs]
+
+    ; Step 3: Expand VGA memory window to 128K (A0000-BFFFF)
+    mov dx, 0x3CE
+    mov al, 0x06
+    out dx, al
+    inc dx
+    in al, dx
+    and al, 0xF3                    ; Map bits = 00 → 128K
+    out dx, al
+
+    ; Step 3b: Save Mode 13h CRTC state
+    mov dx, 0x3D4
+    mov al, 0x00
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_00], al
+    dec dx
+    mov al, 0x01
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_01], al
+    dec dx
+    mov al, 0x02
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_02], al
+    dec dx
+    mov al, 0x03
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_03], al
+    dec dx
+    mov al, 0x04
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_04], al
+    dec dx
+    mov al, 0x05
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_05], al
+    dec dx
+    mov al, 0x06
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_06], al
+    dec dx
+    mov al, 0x07
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_07], al
+    dec dx
+    mov al, 0x08
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_08], al
+    dec dx
+    mov al, 0x09
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_09], al
+    dec dx
+    mov al, 0x13
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_13], al
+    dec dx
+    mov al, 0x14
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_14], al
+    dec dx
+    mov al, 0x17
+    out dx, al
+    inc dx
+    in al, dx
+    mov [cs:save_crtc_17], al
+
+    ; Enable CRTC protection: reg 11h bit 7 = 1
+    dec dx
+    mov al, 0x11
+    out dx, al
+    inc dx
+    in al, dx
+    or al, 0x80
+    out dx, al
+
+    ; Step 4: Patch BDA for CGA mode
+    mov ax, 0x0040
+    mov es, ax
+    mov al, [cs:current_mode]
+    mov [es:0x0049], al
+    mov word [es:0x004A], 40
+    mov word [es:0x004C], 0x4000
+    mov byte [es:0x0062], 0
+    mov word [es:0x0063], 0x03D4
+
+    ; Step 5: Load palette, build LUT, activate
+    call load_vga_palette
+    call build_lut
+    mov byte [cs:in_conversion], 0
+    mov byte [cs:last_bios_tick], 0xFF
+    mov byte [cs:is_emulating], 1
+
+    ; Speaker click feedback (two clicks = distinct from VSync toggle)
+    in al, 0x61
+    or al, 0x03
+    out 0x61, al
+    and al, 0xFC
+    out 0x61, al
+
+    sti
+    pop es
+    popad
+    ret
+
+; ============================================================================
 ; INT 08h HANDLER — Hardware timer: chain first, then convert
 ; ============================================================================
 ; Hooks the hardware timer (IRQ 0) instead of INT 1Ch so that the
@@ -871,6 +1040,15 @@ tsr_int09:
     out 0x61, al
     jmp .kbd_consume
 .not_vsync:
+
+    ; ── CTRL+ALT+E: Force-enable emulation (scancode 0x12 = 'E') ──────
+    ; For games that bypass INT 10h and set CGA mode via direct port I/O.
+    ; User starts the game, sees 4-color CGA, then presses CTRL+ALT+E.
+    cmp al, 0x12
+    jne .not_force
+    call force_enable
+    jmp .kbd_consume
+.not_force:
 
     ; Only care about make codes 0x02-0x05 (keys '1' through '4')
     cmp al, 0x02
