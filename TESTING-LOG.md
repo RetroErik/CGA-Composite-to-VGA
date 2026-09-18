@@ -255,6 +255,7 @@ GC6 re-assert, AC touch, pre-scan — all removed. None reliably helped in DOSBo
 4. **Try DOSBox-X or DOSBox Staging** — may handle GC reg 6 memory mapping more correctly
 5. **Performance optimization** — reduce TSR timer tick consumption (especially for 386-class systems)
 6. **Cirrus Logic VLB** — research chip-specific extension registers (GR9-GR11) for potential fix
+7. **Tseng ET4000AX** — CONFIRMED chipset limitation (timing/BIOS/cache all ruled out) — see Real Hardware Testing below. Optional: research Tseng extended registers (3D4h index 33h/34h, legacy 3BFh segment switch) as a low-probability fix attempt.
 
 ---
 
@@ -270,6 +271,7 @@ GC6 re-assert, AC touch, pre-scan — all removed. None reliably helped in DOSBo
 | AMD DX4-100 | DX4-100 | Cirrus CL-GD5424 (512KB) | VLB | **Broken** — only moving objects visible |
 | AST Advantage 6066d | Pentium ODP 83 MHz | Cirrus CL-GD5428 (1MB) | VLB | **Broken** — only moving objects visible |
 | IBM ThinkPad i1411 | ? | NeoMagic NM2160 (MagicGraph 128XD) | Internal | **Works** (v0.9) — crashed on v0.8b shadow buffer |
+| West PC | 386-40 MHz | Tseng ET4000AX | ISA | **Broken** — deterministic noise in dithered texture areas (see ET4000AX section below) |
 
 ### Cirrus Logic VLB — Root Cause Analysis
 
@@ -281,6 +283,23 @@ Both Cirrus VLB systems (CL-GD5424 and CL-GD5428) show identical symptoms: movin
 4. **Shadow + GC6=00 resting** (v0.8b): back to garbage — display engine still sees GC6=00 between conversions
 
 **Conclusion:** Cirrus VLB is a fundamental hardware limitation. GC6=00 is required for B800h access on VLB, but Cirrus cannot render Mode 13h correctly with that setting. Fixing would require Cirrus-specific extension register programming (GR9-GR11) — a separate research project.
+
+### Tseng ET4000AX — Root Cause Analysis
+
+West PC's Trident TVGA 9000B was swapped for a Tseng ET4000AX (same 386-40 MHz system, same ISA slot). CGA2VGA installs fine, but no tested game renders correctly.
+
+**Symptom (Indianapolis 500, `/c1`, mode 6):** Sky, clouds, road surface, cars, and HUD/scoreboard text all render correctly. Only the dithered 1-bit guardrail/embankment texture strips show random color noise ("TV static") instead of a consistent artifact color. This is a different signature than Cirrus VLB (only moving sprites visible, static background garbled) — here flat-color and sharp-edge content is fine, only fine alternating-bit dither patterns are corrupted.
+
+**Eliminated causes (tested in this order):**
+1. BIOS "Memory Remapping" (A0000-FFFFF remap to top of RAM) — disabled, no change
+2. BIOS "Shadow RAM" (all regions) — disabled, no change
+3. Gate A20 Emulation setting — not applicable (all TSR memory access is below 1MB)
+4. CPU clock speed 40 MHz → 13 MHz — no change
+5. DRAM Wait States 1 → 2 — no change
+6. AT Bus Clock 40/3 (13.3 MHz) → 40/8 (5 MHz) — no change
+7. CPU cache: `Fast Cache Read/Write Hit` disabled + `Non-Cacheable Block1` enabled over A0000h-BFFFFh (640KB base, 128KB size) — no change
+
+**Conclusion:** Since neither BIOS memory-decode settings nor any CPU/bus/DRAM/cache timing adjustment affected the noise, the corruption is deterministic, not a marginal timing race. This points to the ET4000AX's own display engine mishandling the non-standard GC6=00 (128K memory map) + chain-4 Mode 13h combination that CGA2VGA depends on — the same general class of issue as the Cirrus VLB limitation above, though the specific failure mode (noise in dithered patterns vs. garbled static backgrounds) differs. Treated as a hardware/chipset limitation, not fixable via BIOS configuration. Reverting to the known-working Trident TVGA 9000B card resolves it.
 
 ### Game Compatibility — Real Hardware
 

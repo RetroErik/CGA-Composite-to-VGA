@@ -185,6 +185,7 @@ Four palettes are included, inspired by the Olivetti Prodest PC1's V6355D hardwa
 | ATI Mach 64 | PCI | **Works** |
 | Cirrus CL-GD5424 | VLB | Broken — display engine incompatible with GC6=00 in chain-4 mode |
 | Cirrus CL-GD5428 | VLB | Broken — same issue |
+| Tseng ET4000AX | ISA | Broken — noise in dithered/composite texture areas. Confirmed chipset limitation, not a timing/BIOS/cache issue (see [TESTING-LOG.md](TESTING-LOG.md)) |
 
 ---
 
